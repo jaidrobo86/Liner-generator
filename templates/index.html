@@ -1,1 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Circular Liner Generator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      padding: 40px 44px;
+      width: 100%;
+      max-width: 520px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+    .logo-icon {
+      width: 38px; height: 38px;
+      background: #1a3fa8;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .logo-icon svg { width: 22px; height: 22px; fill: #fff; }
+    .logo-text { font-size: 18px; font-weight: 700; color: #1a3fa8; letter-spacing: -0.3px; }
+    .logo-sub  { font-size: 12px; color: #888; margin-top: 1px; }
+
+    h1 { font-size: 22px; font-weight: 700; color: #1a1a2e; margin-bottom: 6px; }
+    .subtitle { font-size: 14px; color: #666; margin-bottom: 32px; }
+
+    .section-label {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.8px; color: #999; margin-bottom: 14px; margin-top: 24px;
+    }
+    .section-label:first-of-type { margin-top: 0; }
+
+    .field { margin-bottom: 18px; }
+    label  { display: block; font-size: 13px; font-weight: 600; color: #333; margin-bottom: 6px; }
+
+    input[type="number"], input[type="text"], select {
+      width: 100%; padding: 10px 13px;
+      border: 1.5px solid #dde1ea; border-radius: 7px;
+      font-size: 14px; color: #1a1a2e; background: #fafbfc;
+      transition: border-color 0.15s;
+      appearance: none;
+    }
+    input[type="number"]:focus, input[type="text"]:focus, select:focus {
+      outline: none; border-color: #1a3fa8; background: #fff;
+    }
+
+    .hint { font-size: 11.5px; color: #999; margin-top: 4px; }
+
+    .mode-group {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    }
+    .mode-option { position: relative; }
+    .mode-option input[type="radio"] { position: absolute; opacity: 0; width: 0; }
+    .mode-option label {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 14px 10px; border: 2px solid #dde1ea; border-radius: 9px;
+      cursor: pointer; font-size: 13px; font-weight: 600; color: #555;
+      transition: all 0.15s; text-align: center; gap: 4px;
+    }
+    .mode-option label span.mode-desc { font-size: 11px; font-weight: 400; color: #999; }
+    .mode-option input[type="radio"]:checked + label {
+      border-color: #1a3fa8; background: #eef2ff; color: #1a3fa8;
+    }
+    .mode-option input[type="radio"]:checked + label .mode-desc { color: #1a3fa8; }
+
+    .fabric-group {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+    }
+    .fabric-option { position: relative; }
+    .fabric-option input[type="radio"] { position: absolute; opacity: 0; width: 0; }
+    .fabric-option label {
+      display: flex; flex-direction: column; align-items: center;
+      padding: 12px 8px; border: 2px solid #dde1ea; border-radius: 9px;
+      cursor: pointer; font-size: 13px; font-weight: 700; color: #555;
+      transition: all 0.15s; text-align: center; gap: 3px;
+    }
+    .fabric-option label .fab-detail { font-size: 10.5px; font-weight: 400; color: #999; }
+    .fabric-option input[type="radio"]:checked + label {
+      border-color: #1a3fa8; background: #eef2ff; color: #1a3fa8;
+    }
+    .fabric-option input[type="radio"]:checked + label .fab-detail { color: #1a3fa8; }
+
+    .btn {
+      width: 100%; padding: 13px;
+      background: #1a3fa8; color: #fff;
+      border: none; border-radius: 8px;
+      font-size: 15px; font-weight: 700; cursor: pointer;
+      margin-top: 28px; transition: background 0.15s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    .btn:hover   { background: #1533884; }
+    .btn:active  { background: #122d7a; }
+    .btn:disabled { background: #aab4cc; cursor: not-allowed; }
+
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2.5px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .alert {
+      padding: 11px 14px; border-radius: 7px;
+      font-size: 13px; margin-top: 16px; display: none;
+    }
+    .alert-error   { background: #fff0f0; color: #c0392b; border: 1px solid #f5c6c6; }
+    .alert-success { background: #f0fff4; color: #1a7a3f; border: 1px solid #b2dfcc; }
+
+    .divider { border: none; border-top: 1px solid #eee; margin: 24px 0; }
+
+    .specs-row {
+      display: flex; gap: 18px; flex-wrap: wrap;
+      font-size: 12px; color: #888; margin-top: 8px;
+    }
+    .specs-row span { display: flex; align-items: center; gap: 4px; }
+    .specs-row strong { color: #555; }
+  </style>
+</head>
+<body>
+<div class="card">
+
+  <div class="logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="#fff" stroke-width="2"/><line x1="12" y1="3" x2="12" y2="21" stroke="#fff" stroke-width="1.5"/><line x1="3" y1="12" x2="21" y2="12" stroke="#fff" stroke-width="1.5"/></svg>
+    </div>
+    <div>
+      <div class="logo-text">Liner Generator</div>
+      <div class="logo-sub">D&amp;R Group — Circular Tank Liners</div>
+    </div>
+  </div>
+
+  <h1>Panel Layout</h1>
+  <p class="subtitle">Enter tank parameters to generate a fabrication drawing with panel dimensions and fabric schedule.</p>
+
+  <form id="linerForm" action="/generate" method="POST">
+
+    <div class="section-label">Tank &amp; Project</div>
+
+    <div class="field">
+      <label for="diameter">Tank Diameter (m)</label>
+      <input type="number" id="diameter" name="diameter"
+             step="0.1" min="1" max="500" placeholder="e.g. 78.4" required />
+      <div class="hint">Internal diameter in metres</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+      <div class="field">
+        <label for="client">Client</label>
+        <input type="text" id="client" name="client" placeholder="e.g. Concept" />
+      </div>
+      <div class="field">
+        <label for="project">Project</label>
+        <input type="text" id="project" name="project" placeholder="e.g. Bowen Tank" />
+      </div>
+    </div>
+
+    <hr class="divider" />
+    <div class="section-label">Fabric Reference</div>
+
+    <div class="fabric-group">
+      <div class="fabric-option">
+        <input type="radio" name="fabric_ref" id="f6020" value="EL6020" required />
+        <label for="f6020">
+          EL6020
+          <span class="fab-detail">0.5 mm · 500 gsm</span>
+        </label>
+      </div>
+      <div class="fabric-option">
+        <input type="radio" name="fabric_ref" id="f6030" value="EL6030" checked />
+        <label for="f6030">
+          EL6030
+          <span class="fab-detail">0.75 mm · 750 gsm</span>
+        </label>
+      </div>
+      <div class="fabric-option">
+        <input type="radio" name="fabric_ref" id="f6040" value="EL6040" />
+        <label for="f6040">
+          EL6040
+          <span class="fab-detail">1.0 mm · 1000 gsm</span>
+        </label>
+      </div>
+    </div>
+
+    <hr class="divider" />
+    <div class="section-label">Panel Mode</div>
+
+    <div class="mode-group">
+      <div class="mode-option">
+        <input type="radio" name="mode" id="mIndividual" value="individual" checked />
+        <label for="mIndividual">
+          Individual
+          <span class="mode-desc">Single panels,<br/>all site-welded</span>
+        </label>
+      </div>
+      <div class="mode-option">
+        <input type="radio" name="mode" id="mPrefab" value="prefab" />
+        <label for="mPrefab">
+          3-Panel Pre-fab
+          <span class="mode-desc">3 shop-welded<br/>assemblies</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="specs-row">
+      <span><strong>Roll width:</strong> 3.76 m</span>
+      <span><strong>Weld overlap:</strong> 120 mm</span>
+      <span><strong>Net per strip:</strong> 3.64 m</span>
+    </div>
+
+    <button type="submit" class="btn" id="submitBtn">
+      <div class="spinner" id="spinner"></div>
+      <span id="btnText">Generate PDF</span>
+    </button>
+
+    <div class="alert alert-error"   id="alertError"></div>
+    <div class="alert alert-success" id="alertSuccess"></div>
+
+  </form>
+</div>
+
+<script>
+  const form       = document.getElementById("linerForm");
+  const btn        = document.getElementById("submitBtn");
+  const spinner    = document.getElementById("spinner");
+  const btnText    = document.getElementById("btnText");
+  const alertError = document.getElementById("alertError");
+  const alertOk    = document.getElementById("alertSuccess");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    alertError.style.display = "none";
+    alertOk.style.display    = "none";
+
+    btn.disabled         = true;
+    spinner.style.display = "block";
+    btnText.textContent  = "Generating…";
+
+    try {
+      const resp = await fetch("/generate", {
+        method: "POST",
+        body: new FormData(form),
+      });
+
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({ error: "Server error" }));
+        throw new Error(data.error || "Unknown error");
+      }
+
+      // Trigger download
+      const blob     = await resp.blob();
+      const url      = URL.createObjectURL(blob);
+      const a        = document.createElement("a");
+      const diameter = document.getElementById("diameter").value;
+      const fabric   = document.querySelector('input[name="fabric_ref"]:checked').value;
+      const mode     = document.querySelector('input[name="mode"]:checked').value;
+      a.href         = url;
+      a.download     = `${diameter}m_${fabric}_${mode}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      alertOk.textContent     = "PDF generated successfully — check your downloads.";
+      alertOk.style.display   = "block";
+
+    } catch (err) {
+      alertError.textContent  = "Error: " + err.message;
+      alertError.style.display = "block";
+    } finally {
+      btn.disabled          = false;
+      spinner.style.display = "none";
+      btnText.textContent   = "Generate PDF";
+    }
+  });
+</script>
+</body>
+</html>
