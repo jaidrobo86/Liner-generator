@@ -1,64 +1,68 @@
 """
-Circular Liner Panel Layout Generator
-Generates PDF drawings for circular LLDPE liner panels (individual or 3-panel pre-fab).
+Circular / Rectangular Liner Panel Layout Generator
+Outputs PDF (2 pages) and DXF.
 
-Fabric specs:
-  Roll width:  3.76 m
-  Weld overlap: 0.12 m
-  Net usable:  3.64 m per strip
-
-Fabric density:
-  EL6020: 500 gsm (0.5 mm)
-  EL6030: 750 gsm (0.75 mm)
-  EL6040: 1000 gsm (1.0 mm)
+Fabric specs (defaults):
+  EL6020: 500 gsm, 0.5 mm, roll 500 m
+  EL6030: 750 gsm, 0.75 mm, roll 381 m
+  EL6040: 1000 gsm, 1.0 mm, roll 304 m
 """
 
 import math
+import io as _io
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.pdfgen import canvas
-from reportlab.lib import colors
 from reportlab.lib.units import mm
+import ezdxf
 
+# ---------------------------------------------------------------------------
+# Default fabric presets
+# ---------------------------------------------------------------------------
 
-# ─── Constants ────────────────────────────────────────────────────────────────
-
-ROLL_WIDTH   = 3.76   # m  (gross fabric width)
-WELD_OVERLAP = 0.12   # m  (weld seam overlap per seam)
-NET_WIDTH    = round(ROLL_WIDTH - WELD_OVERLAP, 4)   # 3.64 m net per strip
-
-FABRIC_SPECS = {
-    "EL6020": {"gsm": 500,  "thickness_mm": 0.5},
-    "EL6030": {"gsm": 750,  "thickness_mm": 0.75},
-    "EL6040": {"gsm": 1000, "thickness_mm": 1.0},
+FABRIC_PRESETS = {
+    "EL6020": {"gsm": 500,  "thickness_mm": 0.5,  "max_roll_m": 500,
+               "roll_width": 3.76, "weld_overlap": 0.12},
+    "EL6030": {"gsm": 750,  "thickness_mm": 0.75, "max_roll_m": 381,
+               "roll_width": 3.76, "weld_overlap": 0.12},
+    "EL6040": {"gsm": 1000, "thickness_mm": 1.0,  "max_roll_m": 304,
+               "roll_width": 3.76, "weld_overlap": 0.12},
 }
 
 # Colours (RGB 0-1)
-COL_BLACK    = (0,    0,    0   )
-COL_RED      = (0.85, 0.1,  0.1 )
-COL_BLUE     = (0.1,  0.25, 0.65)
-COL_LGRAY    = (0.88, 0.88, 0.88)
-COL_DGRAY    = (0.45, 0.45, 0.45)
-COL_WHITE    = (1,    1,    1   )
+COL_BLACK = (0,    0,    0   )
+COL_RED   = (0.85, 0.1,  0.1 )
+COL_BLUE  = (0.1,  0.25, 0.65)
+COL_LGRAY = (0.88, 0.88, 0.88)
+COL_DGRAY = (0.45, 0.45, 0.45)
+COL_WHITE = (1,    1,    1   )
+
+STRIP_COL_A = (0.75, 0.88, 1.0)   # light blue  - odd groups
+STRIP_COL_B = (0.80, 1.0,  0.80)  # light green - even groups
 
 
-# ─── Geometry ─────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Geometry: circular
+# ---------------------------------------------------------------------------
 
-def _build_strips_from_offset(x_start, radius):
-    """
-    Build strip list given a starting x_left edge, stepping rightward by NET_WIDTH.
-    Only strips whose midpoint falls inside the circle are included.
-    """
+def _build_circular_strips(x_start, radius, net_width, full_coverage=True):
     strips = []
     x = x_start
     while True:
         x_l = x
-        x_r = x + NET_WIDTH
-        x_mid = (x_l + x_r) / 2.0
-        if x_mid > radius:
+        x_r = x + net_width
+        if x_l >= radius:
             break
-        if abs(x_mid) < radius:
-            x_inner = min(abs(x_l), abs(x_r))
-            chord = 2 * math.sqrt(max(0, radius**2 - x_inner**2))
+        overlaps = x_r > -radius and x_l < radius
+        if overlaps:
+            if full_coverage:
+                x_inner = min(min(abs(x_l), abs(x_r)), radius)
+            else:
+                # only full strips
+                if abs(x_l) > radius or abs(x_r) > radius:
+                    x += net_width
+                    continue
+                x_inner = min(abs(x_l), abs(x_r))
+            chord  = 2 * math.sqrt(max(0, radius**2 - x_inner**2))
             inside = (abs(x_l) <= radius) and (abs(x_r) <= radius)
             strips.append({
                 "x_left":  x_l,
@@ -66,401 +70,758 @@ def _build_strips_from_offset(x_start, radius):
                 "chord_m": round(chord, 1),
                 "is_site": not inside,
             })
-        x += NET_WIDTH
-
+        x += net_width
     for idx, s in enumerate(strips):
         s["index"] = idx + 1
     return strips
 
 
-def _total_fabric(strips):
-    return sum(s["chord_m"] for s in strips)
-
-
-def compute_strips(diameter_m):
-    """
-    Try two layouts and return whichever uses less total fabric.
-
-    Layout A (straddled): strips straddle the centreline — current default.
-    Layout B (centred):   one strip sits exactly on the centreline.
-
-    Returns (strips, layout_label).
-    """
+def compute_circular_strips(diameter_m, net_width,
+                             layout="auto", full_coverage=True):
     radius = diameter_m / 2.0
+    n_a = math.ceil(radius / net_width)
+    sa = _build_circular_strips(
+        -n_a * net_width, radius, net_width, full_coverage
+    )
+    n_b = math.floor(radius / net_width)
+    sb = _build_circular_strips(
+        -(net_width / 2) - n_b * net_width, radius, net_width, full_coverage
+    )
 
-    # Layout A: symmetric pair straddling centre
-    n_half_a = math.ceil(radius / NET_WIDTH)
-    strips_a = _build_strips_from_offset(-n_half_a * NET_WIDTH, radius)
+    def covers_full_circle(strips):
+        if not strips:
+            return False
+        return strips[0]["x_left"] <= -radius and strips[-1]["x_right"] >= radius
 
-    # Layout B: one strip centred on the axis
-    n_half_b = math.floor(radius / NET_WIDTH)
-    strips_b = _build_strips_from_offset(-(NET_WIDTH / 2.0) - n_half_b * NET_WIDTH, radius)
+    fab_a = sum(s["chord_m"] for s in sa)
+    fab_b = sum(s["chord_m"] for s in sb)
 
-    if _total_fabric(strips_b) < _total_fabric(strips_a):
-        return strips_b, "B \u2013 centre strip"
+    if full_coverage:
+        a_ok = covers_full_circle(sa)
+        b_ok = covers_full_circle(sb)
+        if layout == "centred":
+            strips, label = (sb, "Centred") if b_ok else (sa, "Straddled")
+        elif layout == "straddled":
+            strips, label = sa, "Straddled"
+        else:  # auto
+            valid = []
+            if a_ok: valid.append((fab_a, sa, "Auto - straddled"))
+            if b_ok: valid.append((fab_b, sb, "Auto - centred"))
+            _, strips, label = min(valid, key=lambda x: x[0]) if valid else (None, sa, "Auto - straddled")
     else:
-        return strips_a, "A \u2013 straddled"
-
-
-def assign_prefab_panels(strips):
-    """
-    For 3-panel pre-fab mode, assign each strip to panel A, B, or C.
-    Split: left third → A, middle third → B, right third → C.
-    Returns strips with added key 'panel' in {'A','B','C'}.
-    """
-    n = len(strips)
-    third = n / 3.0
-    for s in strips:
-        i = s["index"] - 1   # 0-based
-        if i < third:
-            s["panel"] = "A"
-        elif i < 2 * third:
-            s["panel"] = "B"
+        if layout == "centred":
+            strips, label = sb, "Centred"
+        elif layout == "straddled":
+            strips, label = sa, "Straddled"
         else:
-            s["panel"] = "C"
+            strips, label = (sb, "Auto - centred") if fab_b < fab_a else (sa, "Auto - straddled")
+
+    return strips, label
+
+
+# ---------------------------------------------------------------------------
+# Geometry: rectangular
+# ---------------------------------------------------------------------------
+
+def compute_rectangular_strips(width_m, length_m, net_width,
+                                strip_direction="along_width",
+                                full_coverage=True):
+    """
+    strip_direction:
+      'along_width'  -> strips run across the width  (seams parallel to width axis)
+                        each strip has length = length_m, count = ceil(width / net_width)
+      'along_length' -> strips run across the length (seams parallel to length axis)
+                        each strip has length = width_m,  count = ceil(length / net_width)
+    """
+    if strip_direction == "along_width":
+        span        = width_m
+        strip_len   = length_m
+        axis_label  = "Along width"
+    else:
+        span        = length_m
+        strip_len   = width_m
+        axis_label  = "Along length"
+
+    n_strips = math.ceil(span / net_width)
+    strips   = []
+    for i in range(n_strips):
+        x_l    = i * net_width
+        x_r    = x_l + net_width
+        inside = x_r <= span
+        strips.append({
+            "index":   i + 1,
+            "x_left":  x_l,
+            "x_right": min(x_r, span),
+            "chord_m": round(strip_len, 1),
+            "is_site": not inside,
+        })
+
+    return strips, f"Rect {axis_label}"
+
+
+# ---------------------------------------------------------------------------
+# Grouping / colouring
+# ---------------------------------------------------------------------------
+
+def assign_groups(strips, strips_per_unit):
+    """Assign colour groups cycling every strips_per_unit strips."""
+    for s in strips:
+        i         = s["index"] - 1
+        grp       = i // strips_per_unit + 1
+        s["group"]    = grp
+        s["fill_col"] = STRIP_COL_A if grp % 2 == 1 else STRIP_COL_B
     return strips
 
 
-def fabric_meters_for_strip(strip, diameter_m):
+def assign_individual(strips):
+    for s in strips:
+        i = s["index"] - 1
+        s["group"]    = i + 1
+        s["fill_col"] = STRIP_COL_A if (i % 2 == 0) else STRIP_COL_B
+    return strips
+
+
+# ---------------------------------------------------------------------------
+# Calculations
+# ---------------------------------------------------------------------------
+
+def panel_weight_kg(chord_m, roll_width, gsm):
+    return round(chord_m * roll_width * gsm / 1000, 1)
+
+
+def total_weld_length(strips, net_width, shape, **kwargs):
     """
-    Fabric used for a strip = chord length (rounded up to nearest 0.5 m for cutting allowance).
-    For site strips, we still count the chord at midpoint.
+    Total longitudinal weld length in metres.
+    = number of internal seams * average strip length
+    For circle: seams between strips = n-1 internal seams, each seam length = average chord
+    For rectangle: seams = n-1, each seam length = strip_len
     """
-    return strip["chord_m"]
+    n = len(strips)
+    if n <= 1:
+        return 0.0
+    avg_len = sum(s["chord_m"] for s in strips) / n
+    return round((n - 1) * avg_len, 1)
 
 
-def panel_weight_kg(chord_m, gsm):
-    """
-    Weight of a single strip panel.
-    Area = chord_m * NET_WIDTH (net, since gross was used but overlap is shared)
-    Actually: fabric area = chord_m * ROLL_WIDTH (gross roll width)
-    Weight = area * gsm / 1000
-    """
-    area_m2 = chord_m * ROLL_WIDTH
-    return round(area_m2 * gsm / 1000, 1)
+def build_weld_schedule(strips, max_roll_m):
+    schedule = []
+    for s in strips:
+        L        = s["chord_m"]
+        n_full   = int(L / max_roll_m)
+        leftover = round(L - n_full * max_roll_m, 2)
+        rolls    = n_full + (1 if leftover > 0 else 0)
+        joins    = [round((j+1)*max_roll_m, 1) for j in range(n_full)
+                    if (j+1)*max_roll_m < L]
+        schedule.append({
+            "index":      s["index"],
+            "chord_m":    L,
+            "rolls":      rolls,
+            "joins_at":   joins,
+            "leftover_m": leftover if leftover > 0 else max_roll_m,
+            "is_site":    s["is_site"],
+            "group":      s.get("group", None),
+        })
+    return schedule
 
 
-# ─── PDF Drawing ──────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# PDF helpers
+# ---------------------------------------------------------------------------
 
-PANEL_COLORS = {
-    "A": (0.75, 0.88, 1.0),   # light blue
-    "B": (0.80, 1.0,  0.80),  # light green
-    "C": (1.0,  0.93, 0.75),  # light orange
-    None: (0.95, 0.95, 0.95), # single panel mode
-}
+def _col_xs(col_ws):
+    xs = [0.0]
+    for w in col_ws[:-1]:
+        xs.append(xs[-1] + w * mm)
+    return xs
 
-def draw_liner_pdf(
-    diameter_m,
-    fabric_ref,
-    mode,           # "individual" or "prefab"
+
+def _tbl_header(c, ox, oy, xs, col_ws, headers, row_h):
+    c.setFillColorRGB(*COL_BLUE)
+    c.rect(ox, oy, sum(col_ws)*mm, row_h, fill=1, stroke=0)
+    c.setFont("Helvetica-Bold", 7)
+    c.setFillColorRGB(*COL_WHITE)
+    for i, h in enumerate(headers):
+        c.drawCentredString(ox + xs[i] + col_ws[i]*mm/2, oy + 2*mm, h)
+
+
+def _tbl_row(c, ox, oy, xs, col_ws, vals, row_h, bg):
+    c.setFillColorRGB(*bg)
+    c.rect(ox, oy, sum(col_ws)*mm, row_h, fill=1, stroke=0)
+    c.setFont("Helvetica", 6.5)
+    c.setFillColorRGB(*COL_BLACK)
+    for i, v in enumerate(vals):
+        c.drawCentredString(ox + xs[i] + col_ws[i]*mm/2, oy + 1.8*mm, str(v))
+    c.setStrokeColorRGB(0.8, 0.8, 0.8)
+    c.setLineWidth(0.2)
+    c.line(ox, oy, ox + sum(col_ws)*mm, oy)
+
+
+# ---------------------------------------------------------------------------
+# Main generator
+# ---------------------------------------------------------------------------
+
+def generate_liner(
+    # Shape
+    shape="circle",          # "circle" or "rectangle"
+    diameter_m=None,         # circle
+    width_m=None,            # rectangle
+    length_m=None,           # rectangle
+    strip_direction="along_width",  # rectangle only
+
+    # Fabric
+    fabric_ref="EL6030",
+    roll_width=None,         # override
+    weld_overlap=None,       # override
+    gsm=None,                # override
+    thickness_mm=None,       # override
+    max_roll_m=None,         # override
+    fabric_name=None,        # override name
+
+    # Layout
+    layout="auto",           # "auto","centred","straddled"
+    mode="individual",       # "individual","prefab"
+    strips_per_unit=3,
+    full_coverage=True,
+    perimeter_allowance_mm=0,
+
+    # Meta
     client="",
     project="",
-    output_path="liner_layout.pdf"
 ):
-    assert fabric_ref in FABRIC_SPECS, f"Unknown fabric ref: {fabric_ref}"
-    assert mode in ("individual", "prefab"), "mode must be 'individual' or 'prefab'"
-
-    gsm   = FABRIC_SPECS[fabric_ref]["gsm"]
-    thick = FABRIC_SPECS[fabric_ref]["thickness_mm"]
-    radius = diameter_m / 2.0
-
-    strips, layout_label = compute_strips(diameter_m)
-    if mode == "prefab":
-        strips = assign_prefab_panels(strips)
+    # Resolve fabric spec
+    if fabric_ref in FABRIC_PRESETS and roll_width is None:
+        spec = FABRIC_PRESETS[fabric_ref].copy()
     else:
-        for s in strips:
-            s["panel"] = None
+        base = FABRIC_PRESETS.get(fabric_ref, FABRIC_PRESETS["EL6030"])
+        spec = {
+            "roll_width":   roll_width   or base["roll_width"],
+            "weld_overlap": weld_overlap or base["weld_overlap"],
+            "gsm":          gsm          or base["gsm"],
+            "thickness_mm": thickness_mm or base["thickness_mm"],
+            "max_roll_m":   max_roll_m   or base["max_roll_m"],
+        }
 
-    # ── Page setup ────────────────────────────────────────────────────────────
+    rw         = spec["roll_width"]
+    wo         = spec["weld_overlap"]
+    net_w      = round(rw - wo, 4)
+    fab_gsm    = spec["gsm"]
+    fab_thick  = spec["thickness_mm"]
+    max_roll   = spec["max_roll_m"]
+    fab_label  = fabric_name or fabric_ref
+    pa_m       = perimeter_allowance_mm / 1000.0   # convert to metres
+
+    # Compute strips
+    if shape == "circle":
+        eff_radius = diameter_m / 2.0 + pa_m
+        strips, layout_label = compute_circular_strips(
+            eff_radius * 2, net_w, layout, full_coverage)
+        nom_radius = diameter_m / 2.0
+    else:
+        eff_w = width_m  + 2 * pa_m
+        eff_l = length_m + 2 * pa_m
+        strips, layout_label = compute_rectangular_strips(
+            eff_w, eff_l, net_w, strip_direction, full_coverage)
+        nom_radius = None
+
+    # Assign colours / groups
+    if mode == "prefab":
+        strips = assign_groups(strips, strips_per_unit)
+    else:
+        strips = assign_individual(strips)
+
+    # Totals
+    total_fabric = round(sum(s["chord_m"] for s in strips), 1)
+    total_area   = round(total_fabric * rw, 1)
+    total_weight = round(sum(panel_weight_kg(s["chord_m"], rw, fab_gsm)
+                             for s in strips), 0)
+    site_fabric  = round(sum(s["chord_m"] for s in strips if s["is_site"]), 1)
+    weld_len     = total_weld_length(strips, net_w, shape)
+    n_groups     = strips[-1]["group"] if strips else 0
+    mode_label   = "Prefab assembly" if mode == "prefab" else "Individual"
+
+    if shape == "circle":
+        shape_desc = f"Circle  O {diameter_m} m"
+    else:
+        sq = " (Square)" if width_m == length_m else ""
+        shape_desc = f"Rectangle{sq}  {width_m} x {length_m} m"
+
+    return dict(
+        strips=strips, layout_label=layout_label, mode_label=mode_label,
+        shape=shape, shape_desc=shape_desc,
+        diameter_m=diameter_m, width_m=width_m, length_m=length_m,
+        strip_direction=strip_direction,
+        nom_radius=nom_radius,
+        eff_width=(width_m+2*pa_m) if shape=="rectangle" else None,
+        eff_length=(length_m+2*pa_m) if shape=="rectangle" else None,
+        rw=rw, wo=wo, net_w=net_w, fab_gsm=fab_gsm, fab_thick=fab_thick,
+        max_roll=max_roll, fab_label=fab_label,
+        pa_m=pa_m, pa_mm=perimeter_allowance_mm,
+        total_fabric=total_fabric, total_area=total_area,
+        total_weight=total_weight, site_fabric=site_fabric,
+        weld_len=weld_len, n_groups=n_groups,
+        client=client, project=project,
+        schedule=build_weld_schedule(strips, max_roll),
+        total_rolls=sum(r["rolls"] for r in build_weld_schedule(strips, max_roll)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PDF output
+# ---------------------------------------------------------------------------
+
+def draw_pdf(data, output_path):
+    strips     = data["strips"]
+    mode_label = data["mode_label"]
+    shape      = data["shape"]
+
     page_w, page_h = landscape(A3)
-    margin_l = 18 * mm
-    margin_r = 18 * mm
-    margin_t = 20 * mm
-    margin_b = 55 * mm
+    ML = 18*mm;  MR = 18*mm;  MT = 22*mm;  MB = 18*mm
 
-    draw_w = page_w - margin_l - margin_r
-    draw_h = page_h - margin_t - margin_b
+    usable_w    = page_w - ML - MR
+    draw_area_w = usable_w * 0.58
+    draw_area_h = page_h - MT - MB - 30*mm
 
-    scale = min(draw_w, draw_h) / (diameter_m * 1.08)
-    cx = margin_l + draw_w / 2
-    cy = margin_b + draw_h / 2 + 4*mm
+    # Scale
+    if shape == "circle":
+        nom_size = (data["diameter_m"] + 2*data["pa_m"]) * 1.15
+        scale    = min(draw_area_w, draw_area_h) / nom_size
+        cx       = ML + draw_area_w / 2
+        cy       = MB + 30*mm + draw_area_h / 2
+    else:
+        eff_w  = data["eff_width"]
+        eff_l  = data["eff_length"]
+        scale  = min(draw_area_w / (eff_w * 1.1),
+                     draw_area_h / (eff_l * 1.1))
+        cx     = ML + draw_area_w / 2
+        cy     = MB + 30*mm + draw_area_h / 2
 
-    def m2pt(v):
-        return v * scale
+    def m2pt(v): return v * scale
 
-    # ── Pre-calculate totals (needed for summary box on page 1) ──────────────
-    total_fabric  = 0
-    total_area    = 0
-    total_weight  = 0
-    site_fabric   = 0
-    for s in strips:
-        chord = s["chord_m"]
-        total_fabric += chord
-        total_area   += round(chord * ROLL_WIDTH, 1)
-        total_weight += panel_weight_kg(chord, gsm)
-        if s["is_site"]:
-            site_fabric += chord
+    buf = _io.BytesIO()
+    c   = canvas.Canvas(buf, pagesize=(page_w, page_h))
 
-    # ── Summary box (page 1, bottom right) ───────────────────────────────────
-    col_widths = [18, 22, 22, 28, 28, 30]
-    if mode == "prefab":
-        col_widths.append(20)
-    total_w = sum(col_widths) * mm
-    sx = margin_l + total_w + 8*mm
-    sy = margin_b - 6*mm
+    # ── PAGE 1 ──────────────────────────────────────────────────────────────
+    c.setFillColorRGB(*COL_WHITE)
+    c.rect(0, 0, page_w, page_h, fill=1, stroke=0)
 
-    summary_lines = [
-        (True,  f"Diameter:          {diameter_m} m"),
-        (False, f"Radius:            {radius} m"),
-        (False, f"Layout:            {layout_label}"),
-        (False, f"Total strips:      {len(strips)}"),
-        (False, f"Total fabric:      {total_fabric:.1f} m"),
-        (False, f"  of which site:   {site_fabric:.1f} m"),
-        (False, f"Total area:        {total_area:.1f} m²"),
-        (False, f"Total weight:      {total_weight:.0f} kg"),
-        (False, f"Fabric ref:        {fabric_ref}"),
-        (False, f"Net strip width:   {NET_WIDTH} m"),
-    ]
-    # ── Build 2-page PDF in memory ────────────────────────────────────────────
-    import io as _io
-    buf1 = _io.BytesIO()
+    if shape == "circle":
+        _draw_circular_strips(c, strips, cx, cy, m2pt,
+                              data["nom_radius"], data["pa_m"])
+    else:
+        _draw_rectangular_strips(c, strips, cx, cy, m2pt,
+                                 data["eff_width"], data["eff_length"],
+                                 data["width_m"], data["length_m"],
+                                 data["pa_m"], data["strip_direction"])
 
-    # ---- Redraw page 1 into buf1 ----
-    c1 = canvas.Canvas(buf1, pagesize=(page_w, page_h))
-
-    # background
-    c1.setFillColorRGB(*COL_WHITE)
-    c1.rect(0, 0, page_w, page_h, fill=1, stroke=0)
-
-    # strips
-    for s in strips:
-        xl = s["x_left"];  xr = s["x_right"];  panel = s["panel"]
-        # Use full strip width (unclamped) so rectangles always cover the circle edge.
-        # Height uses chord at inner edge (closest to centre) — always the longest chord
-        # in the strip, guaranteeing vertical coverage beyond the circle boundary.
-        x_inner = min(abs(xl), abs(xr))
-        half_chord = math.sqrt(max(0, radius**2 - x_inner**2))
-        px_l = cx + m2pt(xl);  px_r = cx + m2pt(xr)
-        py_b = cy - m2pt(half_chord);  py_t = cy + m2pt(half_chord)
-        pw = px_r - px_l;  ph = py_t - py_b
-        fill_col = PANEL_COLORS[panel]
-        if s["is_site"]:
-            fill_col = (1.0, 0.85, 0.85)
-        c1.setFillColorRGB(*fill_col)
-        c1.setStrokeColorRGB(*COL_BLACK)
-        c1.setLineWidth(0.4)
-        c1.rect(px_l, py_b, pw, ph, fill=1, stroke=1)
-        c1.setStrokeColorRGB(*COL_DGRAY)
-        c1.setLineWidth(0.3);  c1.setDash([3, 3])
-        c1.line(px_l, py_b, px_l, py_t);  c1.setDash([])
-        lx = (px_l + px_r) / 2
-        c1.saveState();  c1.translate(lx, cy);  c1.rotate(90)
-        c1.setFont("Helvetica-Bold", 7);  c1.setFillColorRGB(*COL_BLACK)
-        c1.drawCentredString(0, -2.5, f"{s['index']}")
-        c1.setFont("Helvetica", 6)
-        c1.drawCentredString(0, -10, f"{s['chord_m']}m")
-        c1.restoreState()
-
-    # circle
-    c1.setStrokeColorRGB(*COL_RED);  c1.setLineWidth(1.2)
-    c1.circle(cx, cy, m2pt(radius), fill=0, stroke=1)
-
-    # site weld labels
-    site_strips = [s for s in strips if s["is_site"]]
-    if site_strips:
-        c1.setFont("Helvetica-BoldOblique", 7);  c1.setFillColorRGB(*COL_RED)
-        ls = site_strips[0]
-        px = cx + m2pt(ls["x_left"]) - 2*mm
-        c1.saveState();  c1.translate(px, cy);  c1.rotate(90)
-        c1.drawCentredString(0, 0, "SITE WELD");  c1.restoreState()
-        rs = site_strips[-1]
-        px2 = cx + m2pt(rs["x_right"]) + 2*mm
-        c1.saveState();  c1.translate(px2, cy);  c1.rotate(90)
-        c1.drawCentredString(0, 0, "SITE WELD");  c1.restoreState()
-
-    # prefab dividers
-    if mode == "prefab":
-        boundaries = []
-        prev = strips[0]["panel"]
-        for s in strips[1:]:
-            if s["panel"] != prev:
-                boundaries.append(s["x_left"]);  prev = s["panel"]
-        c1.setStrokeColorRGB(*COL_BLUE);  c1.setLineWidth(1.5);  c1.setDash([8, 4])
-        for bx in boundaries:
-            px = cx + m2pt(bx)
-            c1.line(px, cy - m2pt(radius) - 5*mm, px, cy + m2pt(radius) + 5*mm)
-        c1.setDash([])
-        panel_groups = {}
-        for s in strips:
-            panel_groups.setdefault(s["panel"], []).append(s)
-        for pname, pstrips in panel_groups.items():
-            mid_x = (pstrips[0]["x_left"] + pstrips[-1]["x_right"]) / 2
-            px = cx + m2pt(mid_x);  py = cy + m2pt(radius) + 8*mm
-            c1.setFont("Helvetica-Bold", 10);  c1.setFillColorRGB(*COL_BLUE)
-            c1.drawCentredString(px, py, f"Panel {pname}")
-
-    # title
+    # Title
     title_y = page_h - 13*mm
-    c1.setFont("Helvetica-Bold", 10);  c1.setFillColorRGB(*COL_BLACK)
-    mode_label = "3-Panel Pre-fab" if mode == "prefab" else "Individual Panels"
-    c1.drawString(margin_l, title_y, f"Client: {client}   |   Project: {project}")
-    c1.setFont("Helvetica", 9)
-    c1.drawString(margin_l, title_y - 11,
-        f"Circular Liner  Ø {diameter_m} m   |   {mode_label}   |   Layout: {layout_label}   |   "
-        f"Fabric: {fabric_ref} ({thick} mm / {gsm} gsm)   |   "
-        f"Roll width: {ROLL_WIDTH} m   Weld: {int(WELD_OVERLAP*1000)} mm   Net: {NET_WIDTH} m")
+    c.setFont("Helvetica-Bold", 10); c.setFillColorRGB(*COL_BLACK)
+    c.drawString(ML, title_y, f"Client: {data['client']}   |   Project: {data['project']}")
+    c.setFont("Helvetica", 8)
+    c.drawString(ML, title_y - 11,
+        f"{data['shape_desc']}   |   {mode_label}   |   Layout: {data['layout_label']}   |   "
+        f"Fabric: {data['fab_label']} ({data['fab_thick']} mm / {data['fab_gsm']} gsm)   |   "
+        f"Roll: {data['rw']} m   Weld: {int(data['wo']*1000)} mm   Net: {data['net_w']} m"
+        + (f"   |   Perimeter allowance: {data['pa_mm']} mm" if data['pa_mm'] else ""))
 
-    # summary box
-    c1.setFillColorRGB(*COL_BLACK)
-    for li, (bold, line) in enumerate(summary_lines):
-        c1.setFont("Helvetica-Bold" if bold else "Helvetica", 7.5)
-        c1.drawString(sx, sy - li * 5.8*mm, line)
+    # Summary box
+    sx = ML;  sy = MB + 58*mm
+    summary = [
+        (True,  f"{data['shape_desc']}"),
+        (False, f"Layout:            {data['layout_label']}"),
+        (False, f"Mode:              {mode_label}"),
+        (False, f"Total strips:      {len(strips)}"),
+        (False, f"Prefab groups:     {data['n_groups']}") if mode_label == "Prefab assembly"
+               else (False, ""),
+        (False, f"Total fabric:      {data['total_fabric']} m"),
+        (False, f"  site weld:       {data['site_fabric']} m"),
+        (False, f"Total weld length: {data['weld_len']} m"),
+        (False, f"Total area:        {data['total_area']} m2"),
+        (False, f"Total weight:      {data['total_weight']} kg"),
+        (False, f"Fabric:            {data['fab_label']}  (max roll {data['max_roll']} m)"),
+        (False, f"Perimeter allow.:  {data['pa_mm']} mm") if data['pa_mm'] else (False, ""),
+    ]
+    for li, (bold, line) in enumerate(summary):
+        if not line:
+            continue
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", 7.5)
+        c.setFillColorRGB(*COL_BLACK)
+        c.drawString(sx, sy - li * 5.6*mm, line)
 
-    c1.showPage()
+    # Strip table bottom-right
+    _draw_strip_table(c, strips, data, page_w, page_h, ML, MR, MB)
 
-    # ---- Page 2: strip table ----
-    headers = ["Strip #", "Chord (m)", "Fabric (m)", "Area (m²)", "Weight (kg)", "Notes"]
-    if mode == "prefab":
-        headers.append("Panel")
+    c.showPage()
 
-    col_x = [margin_l]
-    for w in col_widths[:-1]:
-        col_x.append(col_x[-1] + w * mm)
+    # ── PAGE 2: Weld / roll schedule ─────────────────────────────────────────
+    _draw_weld_schedule(c, data, page_w, page_h, ML, MR, MB, MT)
 
-    row_h    = 6.0 * mm
-    header_h = 7.0 * mm
-    table_top = page_h - 20*mm    # start near top of page 2
-    rows_per_col = int((table_top - 20*mm) / row_h) - 1   # how many rows fit in one column
-
-    # Split strips into column chunks
-    chunks = [strips[i:i+rows_per_col] for i in range(0, len(strips), rows_per_col)]
-    col_block_w = total_w + 10*mm   # width per table column block
-
-    # Page 2 title
-    c1.setFillColorRGB(*COL_WHITE)
-    c1.rect(0, 0, page_w, page_h, fill=1, stroke=0)
-    c1.setFont("Helvetica-Bold", 11);  c1.setFillColorRGB(*COL_BLACK)
-    c1.drawString(margin_l, page_h - 13*mm,
-        f"Strip Schedule  —  Ø {diameter_m} m  {fabric_ref}  {mode_label}")
-    c1.setFont("Helvetica", 9);  c1.setFillColorRGB(*COL_DGRAY)
-    c1.drawString(margin_l, page_h - 22*mm,
-        f"Total: {len(strips)} strips   |   Fabric: {total_fabric:.1f} m   |   "
-        f"Area: {total_area:.1f} m²   |   Weight: {total_weight:.0f} kg")
-
-    for ci, chunk in enumerate(chunks):
-        ox = margin_l + ci * col_block_w   # x offset for this column block
-
-        # Header
-        c1.setFillColorRGB(*COL_BLUE)
-        c1.rect(ox, table_top - header_h, total_w, header_h, fill=1, stroke=0)
-        c1.setFont("Helvetica-Bold", 7);  c1.setFillColorRGB(*COL_WHITE)
-        for i, h in enumerate(headers):
-            c1.drawCentredString(ox + col_x[i] - margin_l + col_widths[i]*mm/2,
-                                 table_top - header_h + 2*mm, h)
-
-        for ri, s in enumerate(chunk):
-            ry = table_top - header_h - (ri + 1) * row_h
-            bg = (1, 1, 1) if ri % 2 == 0 else (0.94, 0.94, 0.94)
-            c1.setFillColorRGB(*bg)
-            c1.rect(ox, ry, total_w, row_h, fill=1, stroke=0)
-
-            chord  = s["chord_m"]
-            area   = round(chord * ROLL_WIDTH, 1)
-            weight = panel_weight_kg(chord, gsm)
-            note   = "Site weld" if s["is_site"] else ""
-            row_vals = [str(s["index"]), f"{chord:.1f}", f"{chord:.1f}",
-                        f"{area:.1f}", f"{weight:.1f}", note]
-            if mode == "prefab":
-                row_vals.append(s.get("panel", ""))
-
-            c1.setFont("Helvetica", 6.5);  c1.setFillColorRGB(*COL_BLACK)
-            for i, val in enumerate(row_vals):
-                c1.drawCentredString(ox + col_x[i] - margin_l + col_widths[i]*mm/2,
-                                     ry + 1.8*mm, val)
-            c1.setStrokeColorRGB(0.75, 0.75, 0.75);  c1.setLineWidth(0.2)
-            c1.line(ox, ry, ox + total_w, ry)
-
-        # Totals row at bottom of each chunk (only last chunk)
-        if ci == len(chunks) - 1:
-            tot_y = table_top - header_h - (len(chunk) + 1) * row_h
-            c1.setFillColorRGB(*COL_LGRAY)
-            c1.rect(ox, tot_y, total_w, row_h, fill=1, stroke=0)
-            c1.setFont("Helvetica-Bold", 6.5);  c1.setFillColorRGB(*COL_BLACK)
-            tot_vals = ["TOTAL", "", f"{total_fabric:.1f}", f"{total_area:.1f}",
-                        f"{total_weight:.1f}", ""]
-            if mode == "prefab":
-                tot_vals.append("")
-            for i, val in enumerate(tot_vals):
-                c1.drawCentredString(ox + col_x[i] - margin_l + col_widths[i]*mm/2,
-                                     tot_y + 1.8*mm, val)
-
-    c1.showPage()
-    c1.save()
-
-    # Write buf1 to actual output
-    buf1.seek(0)
+    c.showPage()
+    c.save()
+    buf.seek(0)
     if hasattr(output_path, "write"):
-        output_path.write(buf1.read())
+        output_path.write(buf.read())
     else:
         with open(output_path, "wb") as f:
-            f.write(buf1.read())
-    print(f"Saved: {output_path}")
-    return {
-        "strips":        len(strips),
-        "total_fabric_m": round(total_fabric, 1),
-        "total_area_m2":  round(total_area, 1),
-        "total_weight_kg": round(total_weight, 0),
-        "site_fabric_m":   round(site_fabric, 1),
-    }
+            f.write(buf.read())
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+def _draw_circular_strips(c, strips, cx, cy, m2pt, nom_radius, pa_m):
+    for s in strips:
+        xl = s["x_left"];  xr = s["x_right"]
+        eff_r  = nom_radius + pa_m
+        x_inner = min(min(abs(xl), abs(xr)), eff_r)
+        half_h  = math.sqrt(max(0, eff_r**2 - x_inner**2))
+        px_l = cx + m2pt(xl);  px_r = cx + m2pt(xr)
+        py_b = cy - m2pt(half_h);  py_t = cy + m2pt(half_h)
+        c.setFillColorRGB(*s["fill_col"])
+        c.setStrokeColorRGB(*COL_BLACK);  c.setLineWidth(0.4)
+        c.rect(px_l, py_b, px_r-px_l, py_t-py_b, fill=1, stroke=1)
+        c.setStrokeColorRGB(*COL_DGRAY);  c.setLineWidth(0.3);  c.setDash([3,3])
+        c.line(px_l, py_b, px_l, py_t);  c.setDash([])
+        lx = (px_l + px_r) / 2
+        c.saveState();  c.translate(lx, cy);  c.rotate(90)
+        c.setFont("Helvetica-Bold", 7);  c.setFillColorRGB(*COL_BLACK)
+        c.drawCentredString(0, -2.5, str(s["index"]))
+        c.setFont("Helvetica", 6)
+        c.drawCentredString(0, -10, f"{s['chord_m']}m")
+        c.restoreState()
+
+    # Nominal circle (red)
+    c.setStrokeColorRGB(*COL_RED);  c.setLineWidth(1.4)
+    c.circle(cx, cy, m2pt(nom_radius), fill=0, stroke=1)
+
+
+def _draw_rectangular_strips(c, strips, cx, cy, m2pt,
+                              eff_w, eff_l, nom_w, nom_l,
+                              pa_m, strip_direction):
+    # Origin: bottom-left of effective rectangle centred on cx, cy
+    ox = cx - m2pt(eff_w / 2)
+    oy = cy - m2pt(eff_l / 2)
+
+    for s in strips:
+        if strip_direction == "along_width":
+            # strips run along length, seams parallel to length axis
+            sx_l = ox + m2pt(s["x_left"])
+            sx_r = ox + m2pt(s["x_right"])
+            sy_b = oy
+            sy_t = oy + m2pt(eff_l)
+        else:
+            sx_l = ox
+            sx_r = ox + m2pt(eff_w)
+            sy_b = oy + m2pt(s["x_left"])
+            sy_t = oy + m2pt(s["x_right"])
+
+        c.setFillColorRGB(*s["fill_col"])
+        c.setStrokeColorRGB(*COL_BLACK);  c.setLineWidth(0.4)
+        c.rect(sx_l, sy_b, sx_r-sx_l, sy_t-sy_b, fill=1, stroke=1)
+        c.setStrokeColorRGB(*COL_DGRAY);  c.setLineWidth(0.3);  c.setDash([3,3])
+        c.line(sx_l, sy_b, sx_l, sy_t);  c.setDash([])
+
+        lx = (sx_l + sx_r) / 2;  ly = (sy_b + sy_t) / 2
+        c.saveState();  c.translate(lx, ly);  c.rotate(90)
+        c.setFont("Helvetica-Bold", 7);  c.setFillColorRGB(*COL_BLACK)
+        c.drawCentredString(0, -2.5, str(s["index"]))
+        c.setFont("Helvetica", 6)
+        c.drawCentredString(0, -10, f"{s['chord_m']}m")
+        c.restoreState()
+
+    # Nominal rectangle (red)
+    nom_ox = cx - m2pt(nom_w / 2)
+    nom_oy = cy - m2pt(nom_l / 2)
+    c.setStrokeColorRGB(*COL_RED);  c.setLineWidth(1.4);  c.setFillColorRGB(0,0,0,0)
+    c.rect(nom_ox, nom_oy, m2pt(nom_w), m2pt(nom_l), fill=0, stroke=1)
+
+
+def _draw_strip_table(c, strips, data, page_w, page_h, ML, MR, MB):
+    mode_label = data["mode_label"]
+    tbl_cw  = [13, 17, 17, 21, 21, 16]
+    tbl_hdrs = ["Strip #", "Length (m)", "Fabric (m)", "Area (m2)", "Weight (kg)", "Notes"]
+    if mode_label == "Prefab assembly":
+        tbl_cw.append(12);  tbl_hdrs.append("Group")
+
+    tbl_w   = sum(tbl_cw) * mm
+    row_h   = 5.0*mm;  hdr_h = 6.0*mm
+    xs      = _col_xs(tbl_cw)
+    avail_h = page_h * 0.52 - MB
+    rpc     = max(1, int((avail_h - hdr_h - row_h) / row_h))
+    chunks  = [strips[i:i+rpc] for i in range(0, len(strips), rpc)]
+    n_ch    = len(chunks)
+    tbl_x0  = page_w - MR - n_ch*(tbl_w + 4*mm)
+
+    for ci, chunk in enumerate(chunks):
+        ox     = tbl_x0 + ci*(tbl_w + 4*mm)
+        oy_hdr = MB + (rpc+1)*row_h
+        _tbl_header(c, ox, oy_hdr, xs, tbl_cw, tbl_hdrs, hdr_h)
+        for ri, s in enumerate(chunk):
+            ry    = MB + (rpc-ri)*row_h
+            chord = s["chord_m"]
+            note  = "Site" if s["is_site"] else ""
+            vals  = [s["index"], f"{chord:.1f}", f"{chord:.1f}",
+                     f"{round(chord*data['rw'],1):.1f}",
+                     f"{panel_weight_kg(chord, data['rw'], data['fab_gsm']):.1f}", note]
+            if mode_label == "Prefab assembly":
+                vals.append(f"G{s['group']}")
+            bg = (1,1,1) if ri%2==0 else (0.94,0.94,0.94)
+            _tbl_row(c, ox, ry, xs, tbl_cw, vals, row_h, bg)
+        if ci == n_ch-1:
+            ry = MB
+            tot = ["TOTAL","",f"{data['total_fabric']:.1f}",
+                   f"{data['total_area']:.1f}",f"{data['total_weight']:.0f}",""]
+            if mode_label == "Prefab assembly": tot.append("")
+            c.setFillColorRGB(*COL_LGRAY)
+            c.rect(ox, ry, tbl_w, row_h, fill=1, stroke=0)
+            c.setFont("Helvetica-Bold", 6.5);  c.setFillColorRGB(*COL_BLACK)
+            for i, v in enumerate(tot):
+                c.drawCentredString(ox+xs[i]+tbl_cw[i]*mm/2, ry+1.8*mm, v)
+
+
+def _draw_weld_schedule(c, data, page_w, page_h, ML, MR, MB, MT):
+    c.setFillColorRGB(*COL_WHITE)
+    c.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+
+    schedule    = data["schedule"]
+    total_rolls = data["total_rolls"]
+    total_joins = sum(len(r["joins_at"]) for r in schedule)
+
+    c.setFont("Helvetica-Bold", 11);  c.setFillColorRGB(*COL_BLACK)
+    c.drawString(ML, page_h-13*mm,
+        f"Weld / Roll Schedule  -  {data['client']}  |  {data['project']}")
+    c.setFont("Helvetica", 9);  c.setFillColorRGB(*COL_DGRAY)
+    c.drawString(ML, page_h-22*mm,
+        f"{data['shape_desc']}   |   {data['fab_label']}   |   "
+        f"Max roll: {data['max_roll']} m   |   "
+        f"Strips: {len(data['strips'])}   |   Total rolls: {total_rolls}   |   "
+        f"Longitudinal joins: {total_joins}   |   "
+        f"Total weld length: {data['weld_len']} m")
+
+    ws_cw   = [13, 20, 14, 13, 54, 20]
+    ws_hdrs = ["Strip #", "Length (m)", "Rolls", "Joins",
+               "Join positions (m from end)", "Last piece (m)"]
+    if data["mode_label"] == "Prefab assembly":
+        ws_cw.insert(1, 13);  ws_hdrs.insert(1, "Group")
+
+    ws_xs      = _col_xs(ws_cw)
+    ws_w       = sum(ws_cw)*mm
+    row_h      = 6.0*mm;  hdr_h = 7.0*mm
+    ws_top     = page_h - 30*mm
+    rpc        = max(1, int((ws_top - MB - hdr_h - row_h) / row_h))
+    ws_chunks  = [schedule[i:i+rpc] for i in range(0, len(schedule), rpc)]
+
+    for ci, chunk in enumerate(ws_chunks):
+        ox     = ML + ci*(ws_w + 6*mm)
+        oy_hdr = ws_top - hdr_h
+        _tbl_header(c, ox, oy_hdr, ws_xs, ws_cw, ws_hdrs, hdr_h)
+        for ri, r in enumerate(chunk):
+            ry    = ws_top - hdr_h - (ri+1)*row_h
+            joins = ", ".join(str(j) for j in r["joins_at"]) if r["joins_at"] else "-"
+            vals  = [r["index"], f"{r['chord_m']:.1f}", r["rolls"],
+                     len(r["joins_at"]) if r["joins_at"] else 0,
+                     joins, f"{r['leftover_m']:.1f}"]
+            if data["mode_label"] == "Prefab assembly":
+                vals.insert(1, f"G{r['group']}" if r["group"] else "")
+            bg = (1.0,0.95,0.95) if r["is_site"] else (
+                 (1,1,1) if ri%2==0 else (0.94,0.94,0.94))
+            _tbl_row(c, ox, ry, ws_xs, ws_cw, vals, row_h, bg)
+
+    # Roll summary
+    last_ci  = len(ws_chunks)-1
+    last_ox  = ML + last_ci*(ws_w+6*mm)
+    last_bot = ws_top - hdr_h - (len(ws_chunks[-1])+2)*row_h
+    c.setFont("Helvetica-Bold", 9);  c.setFillColorRGB(*COL_BLUE)
+    c.drawString(last_ox, last_bot, "Roll Summary")
+    items = [
+        f"Fabric:              {data['fab_label']}",
+        f"Max roll length:     {data['max_roll']} m",
+        f"Total strips:        {len(data['strips'])}",
+        f"Total rolls needed:  {total_rolls}",
+        f"Total joins:         {total_joins}",
+        f"Total weld length:   {data['weld_len']} m",
+        f"Total fabric:        {data['total_fabric']} m",
+        f"Total area:          {data['total_area']} m2",
+        f"Total weight:        {data['total_weight']} kg",
+    ]
+    c.setFont("Helvetica", 8);  c.setFillColorRGB(*COL_BLACK)
+    for li, item in enumerate(items):
+        c.drawString(last_ox, last_bot-(li+1)*6*mm, item)
+
+
+# ---------------------------------------------------------------------------
+# DXF output
+# ---------------------------------------------------------------------------
+
+def draw_dxf(data, output_path):
+    doc = ezdxf.new(dxfversion="R2010")
+    doc.header["$INSUNITS"] = 6   # metres
+    msp = doc.modelspace()
+
+    # Layers
+    doc.layers.add("STRIPS",   color=4)   # cyan
+    doc.layers.add("SEAMS",    color=8)   # gray
+    doc.layers.add("OUTLINE",  color=1)   # red
+    doc.layers.add("LABELS",   color=7)   # white/black
+    doc.layers.add("TITLEBLK", color=7)
+
+    strips = data["strips"]
+    shape  = data["shape"]
+
+    if shape == "circle":
+        _dxf_circular(msp, strips, data)
+    else:
+        _dxf_rectangular(msp, strips, data)
+
+    # Title block (as text at bottom)
+    tb_y = -data["nom_radius"]*1.3 if shape=="circle" else -(data["eff_length"]/2)*1.2
+    msp.add_text(
+        f"Client: {data['client']}  |  Project: {data['project']}",
+        dxfattribs={"layer":"TITLEBLK","height":0.5,
+                    "insert":(-(data["nom_radius"] if shape=="circle"
+                                else data["eff_width"]/2), tb_y-0.8)}
+    )
+    msp.add_text(
+        f"{data['shape_desc']}  |  {data['mode_label']}  |  "
+        f"Layout: {data['layout_label']}  |  "
+        f"Fabric: {data['fab_label']}  |  "
+        f"Strips: {len(strips)}  |  Fabric: {data['total_fabric']} m  |  "
+        f"Weld length: {data['weld_len']} m  |  "
+        f"Weight: {data['total_weight']} kg",
+        dxfattribs={"layer":"TITLEBLK","height":0.4,
+                    "insert":(-(data["nom_radius"] if shape=="circle"
+                                else data["eff_width"]/2), tb_y-1.8)}
+    )
+
+    if hasattr(output_path, "write"):
+        import io as _io2
+        sbuf = _io2.StringIO()
+        doc.write(sbuf)
+        output_path.write(sbuf.getvalue().encode("utf-8"))
+    else:
+        doc.saveas(output_path)
+
+
+def _dxf_circular(msp, strips, data):
+    nom_r  = data["nom_radius"]
+    eff_r  = nom_r + data["pa_m"]
+
+    for s in strips:
+        xl = s["x_left"];  xr = s["x_right"]
+        x_inner = min(min(abs(xl), abs(xr)), eff_r)
+        half_h  = math.sqrt(max(0, eff_r**2 - x_inner**2))
+        # Rectangle as 4 lines
+        pts = [(xl,-half_h),(xr,-half_h),(xr,half_h),(xl,half_h),(xl,-half_h)]
+        msp.add_lwpolyline(pts, dxfattribs={"layer":"STRIPS", "closed":True})
+        # Seam line
+        msp.add_line((xl,-half_h),(xl,half_h), dxfattribs={"layer":"SEAMS","linetype":"DASHED"})
+        # Label
+        msp.add_text(str(s["index"]),
+                     dxfattribs={"layer":"LABELS","height":nom_r*0.025,
+                                 "insert":((xl+xr)/2, 0),
+                                 "rotation":90, "halign":1, "valign":2})
+        msp.add_text(f"{s['chord_m']}m",
+                     dxfattribs={"layer":"LABELS","height":nom_r*0.02,
+                                 "insert":((xl+xr)/2, -nom_r*0.08),
+                                 "rotation":90, "halign":1, "valign":2})
+
+    # Nominal circle
+    msp.add_circle((0,0), nom_r, dxfattribs={"layer":"OUTLINE","color":1})
+
+
+def _dxf_rectangular(msp, strips, data):
+    eff_w = data["eff_width"]
+    eff_l = data["eff_length"]
+    nom_w = data["width_m"]
+    nom_l = data["length_m"]
+    sd    = data["strip_direction"]
+    ox    = -eff_w/2;  oy = -eff_l/2
+
+    for s in strips:
+        if sd == "along_width":
+            x1 = ox + s["x_left"];  x2 = ox + s["x_right"]
+            y1 = oy;  y2 = oy + eff_l
+        else:
+            x1 = ox;  x2 = ox + eff_w
+            y1 = oy + s["x_left"];  y2 = oy + s["x_right"]
+        pts = [(x1,y1),(x2,y1),(x2,y2),(x1,y2),(x1,y1)]
+        msp.add_lwpolyline(pts, dxfattribs={"layer":"STRIPS","closed":True})
+        msp.add_line((x1,y1),(x1,y2), dxfattribs={"layer":"SEAMS","linetype":"DASHED"})
+        lx = (x1+x2)/2;  ly = (y1+y2)/2
+        msp.add_text(str(s["index"]),
+                     dxfattribs={"layer":"LABELS","height":min(eff_w,eff_l)*0.025,
+                                 "insert":(lx,ly),"rotation":90,
+                                 "halign":1,"valign":2})
+
+    # Nominal rectangle
+    r_pts = [(-nom_w/2,-nom_l/2),(nom_w/2,-nom_l/2),
+             (nom_w/2,nom_l/2),(-nom_w/2,nom_l/2),(-nom_w/2,-nom_l/2)]
+    msp.add_lwpolyline(r_pts, dxfattribs={"layer":"OUTLINE","color":1,"closed":True})
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrappers
+# ---------------------------------------------------------------------------
+
+def draw_liner_pdf(output_path, **kwargs):
+    data = generate_liner(**kwargs)
+    draw_pdf(data, output_path)
+    return data
+
+
+def draw_liner_dxf(output_path, **kwargs):
+    data = generate_liner(**kwargs)
+    draw_dxf(data, output_path)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import argparse, os, sys
+    import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Generate circular liner panel layout PDF.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python liner_generator.py --diameter 78.4 --fabric EL6020 --mode prefab --client Concept --project "Bowen Tank"
-  python liner_generator.py --diameter 103 --fabric EL6040 --mode individual --output east_lyn_primary.pdf
-  python liner_generator.py --diameter 57.3 --fabric EL6030 --mode prefab
-        """
-    )
-    parser.add_argument("--diameter", "-d", type=float, required=True,
-                        help="Tank diameter in metres (e.g. 78.4)")
-    parser.add_argument("--fabric",   "-f", type=str,   required=True,
-                        choices=list(FABRIC_SPECS.keys()),
-                        help="Fabric reference: EL6020, EL6030, or EL6040")
-    parser.add_argument("--mode",     "-m", type=str,   required=True,
-                        choices=["individual", "prefab"],
-                        help="'individual' = single panels, 'prefab' = 3 joined panels")
-    parser.add_argument("--client",   "-c", type=str,   default="",
-                        help="Client name for title block")
-    parser.add_argument("--project",  "-p", type=str,   default="",
-                        help="Project name for title block")
-    parser.add_argument("--output",   "-o", type=str,   default=None,
-                        help="Output PDF path (default: <diameter>m_<fabric>_<mode>.pdf)")
-
+    parser = argparse.ArgumentParser(description="Liner layout generator")
+    parser.add_argument("--shape",     default="circle",
+                        choices=["circle","rectangle"])
+    parser.add_argument("--diameter",  "-d", type=float)
+    parser.add_argument("--width",     type=float)
+    parser.add_argument("--length",    type=float)
+    parser.add_argument("--strip-dir", default="along_width",
+                        choices=["along_width","along_length"])
+    parser.add_argument("--fabric",    "-f", default="EL6030",
+                        choices=list(FABRIC_PRESETS.keys())+["custom"])
+    parser.add_argument("--mode",      "-m", default="individual",
+                        choices=["individual","prefab"])
+    parser.add_argument("--spu",       type=int, default=3,
+                        help="Strips per prefab unit")
+    parser.add_argument("--layout",    default="auto",
+                        choices=["auto","centred","straddled"])
+    parser.add_argument("--pa",        type=float, default=0,
+                        help="Perimeter allowance mm")
+    parser.add_argument("--full-coverage", action="store_true", default=True)
+    parser.add_argument("--client",    "-c", default="")
+    parser.add_argument("--project",   "-p", default="")
+    parser.add_argument("--output",    "-o", default=None)
+    parser.add_argument("--format",    default="pdf", choices=["pdf","dxf","both"])
     args = parser.parse_args()
 
-    if args.output is None:
-        args.output = f"{args.diameter}m_{args.fabric}_{args.mode}.pdf"
+    base = args.output or f"liner_{args.shape}"
 
-    result = draw_liner_pdf(
-        diameter_m  = args.diameter,
-        fabric_ref  = args.fabric,
-        mode        = args.mode,
-        client      = args.client,
-        project     = args.project,
-        output_path = args.output,
+    kwargs = dict(
+        shape=args.shape, diameter_m=args.diameter,
+        width_m=args.width, length_m=args.length,
+        strip_direction=args.strip_dir,
+        fabric_ref=args.fabric, mode=args.mode,
+        strips_per_unit=args.spu, layout=args.layout,
+        full_coverage=args.full_coverage,
+        perimeter_allowance_mm=args.pa,
+        client=args.client, project=args.project,
     )
-    print(f"\nSummary:")
-    print(f"  Strips:        {result['strips']}")
-    print(f"  Total fabric:  {result['total_fabric_m']} m")
-    print(f"  Site weld:     {result['site_fabric_m']} m")
-    print(f"  Total area:    {result['total_area_m2']} m²")
-    print(f"  Total weight:  {result['total_weight_kg']} kg")
-    print(f"\nSaved to: {args.output}")
+
+    if args.format in ("pdf","both"):
+        path = base+".pdf"
+        draw_liner_pdf(path, **kwargs)
+        print(f"PDF: {path}")
+    if args.format in ("dxf","both"):
+        path = base+".dxf"
+        draw_liner_dxf(path, **kwargs)
+        print(f"DXF: {path}")
