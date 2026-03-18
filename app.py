@@ -55,8 +55,3 @@ def generate():
 if __name__ == "__main__":
     import os
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-```
-
-Also go to Render → Settings and confirm your **Start command** is exactly:
-```
-gunicorn app:app --bind 0.0.0.0:$PORT
