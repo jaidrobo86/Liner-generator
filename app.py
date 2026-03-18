@@ -1,4 +1,5 @@
 import io
+import os
 from flask import Flask, render_template, request, send_file, jsonify
 from liner_generator import draw_liner_pdf, FABRIC_SPECS
 
@@ -26,7 +27,6 @@ def generate():
         if mode not in ("individual", "prefab"):
             return jsonify({"error": "Invalid mode"}), 400
 
-        # Write PDF to an in-memory buffer — no temp files needed
         buf = io.BytesIO()
         draw_liner_pdf(
             diameter_m  = diameter_m,
@@ -53,5 +53,4 @@ def generate():
 
 
 if __name__ == "__main__":
-    import os
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
